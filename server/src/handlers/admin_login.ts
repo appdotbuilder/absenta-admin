@@ -1,12 +1,12 @@
 import { db } from '../db';
 import { adminsTable } from '../db/schema';
-import { type AdminLoginInput, type AdminLoginResponse } from '../schema';
 import { eq, or } from 'drizzle-orm';
+import type { AdminLoginInput, AdminLoginResponse } from '../schema';
 
 export const adminLogin = async (input: AdminLoginInput): Promise<AdminLoginResponse> => {
   try {
-    // Look up admin by NIS or email (identifier field)
-    const admins = await db.select()
+    // Find admin by NIS or email
+    const admin = await db.select()
       .from(adminsTable)
       .where(
         or(
@@ -14,40 +14,39 @@ export const adminLogin = async (input: AdminLoginInput): Promise<AdminLoginResp
           eq(adminsTable.email, input.identifier)
         )
       )
+      .limit(1)
       .execute();
 
-    // Check if admin exists
-    if (admins.length === 0) {
+    if (!admin || admin.length === 0) {
       return {
         success: false,
         message: 'Invalid credentials'
       };
     }
 
-    const admin = admins[0];
+    const adminData = admin[0];
 
-    // Verify password (simple string comparison for now - in production use bcrypt)
-    if (admin.password !== input.password) {
+    // Simple password validation (in production, use proper password hashing)
+    if (adminData.password !== input.password) {
       return {
         success: false,
         message: 'Invalid credentials'
       };
     }
 
-    // Return success with admin data (excluding password)
+    // Return admin data without password
+    const { password, ...adminWithoutPassword } = adminData;
+
     return {
       success: true,
-      admin: {
-        id: admin.id,
-        nis: admin.nis,
-        email: admin.email,
-        full_name: admin.full_name,
-        created_at: admin.created_at,
-        updated_at: admin.updated_at
-      }
+      admin: adminWithoutPassword
+      // No message for successful login as expected by tests
     };
   } catch (error) {
     console.error('Admin login failed:', error);
-    throw error;
+    return {
+      success: false,
+      message: 'Invalid credentials'
+    };
   }
 };

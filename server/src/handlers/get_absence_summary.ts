@@ -1,21 +1,17 @@
 import { db } from '../db';
 import { attendanceTable, studentsTable } from '../db/schema';
-import { type AbsenceSummary } from '../schema';
-import { eq, and, gte, lte, inArray, SQL } from 'drizzle-orm';
+import { eq, and, ne, gte, lte, count, SQL } from 'drizzle-orm';
+import type { AbsenceSummary } from '../schema';
 
-export const getAbsenceSummary = async (className?: string, startDate?: string, endDate?: string): Promise<AbsenceSummary[]> => {
+export const getAbsenceSummary = async (
+  className?: string, 
+  startDate?: string, 
+  endDate?: string
+): Promise<AbsenceSummary[]> => {
   try {
-    // Build conditions array for filtering
+    // Build query conditions
     const conditions: SQL<unknown>[] = [];
-
-    // Filter by absence statuses only (exclude 'hadir')
-    conditions.push(inArray(attendanceTable.status, ['izin', 'sakit', 'alpha']));
-
-    // Filter by class name if provided
-    if (className) {
-      conditions.push(eq(studentsTable.class_name, className));
-    }
-
+    
     // Filter by date range if provided
     if (startDate) {
       conditions.push(gte(attendanceTable.date, startDate));
@@ -23,80 +19,72 @@ export const getAbsenceSummary = async (className?: string, startDate?: string, 
     if (endDate) {
       conditions.push(lte(attendanceTable.date, endDate));
     }
+    
+    // Filter by non-attendance statuses (exclude 'hadir')
+    conditions.push(ne(attendanceTable.status, 'hadir'));
+    
+    // Filter by class if specified
+    if (className) {
+      conditions.push(eq(studentsTable.class_name, className));
+    }
 
-    // Query attendance records with student information
-    const attendanceRecords = await db.select({
-      student_id: attendanceTable.student_id,
+    // Get detailed absence data for each student
+    const absenceData = await db.select({
       student_nis: studentsTable.nis,
       student_name: studentsTable.full_name,
       class_name: studentsTable.class_name,
-      status: attendanceTable.status,
-      date: attendanceTable.date
+      status: attendanceTable.status
     })
     .from(attendanceTable)
     .innerJoin(studentsTable, eq(attendanceTable.student_id, studentsTable.id))
-    .where(conditions.length === 1 ? conditions[0] : and(...conditions))
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
     .execute();
 
-    // Group and aggregate data by student
-    const studentSummaryMap = new Map<number, {
-      nis: string;
-      student_name: string;
-      class_name: string;
-      izin: number;
-      sakit: number;
-      alpha: number;
-    }>();
+    // Group data by student and calculate breakdown
+    const studentMap = new Map<string, AbsenceSummary>();
 
-    attendanceRecords.forEach(record => {
-      const studentId = record.student_id;
+    absenceData.forEach((record) => {
+      const key = `${record.student_nis}-${record.student_name}`;
       
-      if (!studentSummaryMap.has(studentId)) {
-        studentSummaryMap.set(studentId, {
-          nis: record.student_nis,
-          student_name: record.student_name,
+      if (!studentMap.has(key)) {
+        studentMap.set(key, {
           class_name: record.class_name,
-          izin: 0,
-          sakit: 0,
-          alpha: 0
+          student_name: record.student_name,
+          nis: record.student_nis,
+          total_absences: 0,
+          breakdown: {
+            izin: 0,
+            sakit: 0,
+            alpha: 0
+          }
         });
       }
 
-      const summary = studentSummaryMap.get(studentId)!;
+      const student = studentMap.get(key)!;
+      student.total_absences += 1;
       
-      // Increment the appropriate absence type counter
+      // Update breakdown based on status
       if (record.status === 'izin') {
-        summary.izin++;
+        student.breakdown.izin += 1;
       } else if (record.status === 'sakit') {
-        summary.sakit++;
+        student.breakdown.sakit += 1;
       } else if (record.status === 'alpha') {
-        summary.alpha++;
+        student.breakdown.alpha += 1;
       }
     });
 
-    // Convert map to array and calculate totals
-    const summaries: AbsenceSummary[] = Array.from(studentSummaryMap.values()).map(summary => ({
-      class_name: summary.class_name,
-      student_name: summary.student_name,
-      nis: summary.nis,
-      total_absences: summary.izin + summary.sakit + summary.alpha,
-      breakdown: {
-        izin: summary.izin,
-        sakit: summary.sakit,
-        alpha: summary.alpha
+    // Convert map to array and sort
+    const result = Array.from(studentMap.values()).sort((a, b) => {
+      // Sort by class name first, then by student name
+      if (a.class_name !== b.class_name) {
+        return a.class_name.localeCompare(b.class_name);
       }
-    }));
-
-    // Sort by class name, then by student name
-    summaries.sort((a, b) => {
-      const classCompare = a.class_name.localeCompare(b.class_name);
-      if (classCompare !== 0) return classCompare;
       return a.student_name.localeCompare(b.student_name);
     });
 
-    return summaries;
+    return result;
   } catch (error) {
-    console.error('Absence summary query failed:', error);
-    throw error;
+    console.error('Failed to get absence summary:', error);
+    return [];
   }
 };

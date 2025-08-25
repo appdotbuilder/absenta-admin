@@ -1,58 +1,67 @@
 import { db } from '../db';
 import { attendanceTable, adminsTable } from '../db/schema';
-import { type ValidateAttendanceInput } from '../schema';
 import { eq } from 'drizzle-orm';
+import type { ValidateAttendanceInput } from '../schema';
 
 export const validateAttendance = async (input: ValidateAttendanceInput): Promise<{ success: boolean; message: string }> => {
   try {
-    // First, verify that the admin exists
-    const adminExists = await db.select()
+    // Check if admin exists
+    const admin = await db.select()
       .from(adminsTable)
       .where(eq(adminsTable.id, input.admin_id))
+      .limit(1)
       .execute();
 
-    if (adminExists.length === 0) {
+    if (!admin || admin.length === 0) {
       return {
         success: false,
         message: 'Admin not found'
       };
     }
 
-    // Check if the attendance record exists and is still pending
-    const existingAttendance = await db.select()
+    // Check if attendance record exists
+    const attendance = await db.select()
       .from(attendanceTable)
       .where(eq(attendanceTable.id, input.attendance_id))
+      .limit(1)
       .execute();
 
-    if (existingAttendance.length === 0) {
+    if (!attendance || attendance.length === 0) {
       return {
         success: false,
         message: 'Attendance record not found'
       };
     }
 
-    const attendance = existingAttendance[0];
+    const attendanceRecord = attendance[0];
 
-    // Check if already processed
-    if (attendance.validation_status !== 'pending') {
+    // Check if already validated or rejected
+    if (attendanceRecord.validation_status === 'validated') {
       return {
         success: false,
-        message: `Attendance record has already been ${attendance.validation_status}`
+        message: 'Attendance record has already been validated'
       };
     }
 
-    // Update the attendance record
-    const validationStatus = input.action === 'validate' ? 'validated' : 'rejected';
+    if (attendanceRecord.validation_status === 'rejected') {
+      return {
+        success: false,
+        message: 'Attendance record has already been rejected'
+      };
+    }
+
+    const newStatus = input.action === 'validate' ? 'validated' : 'rejected';
     
+    // Update attendance record
     const updateData: any = {
-      validation_status: validationStatus,
+      validation_status: newStatus,
       validated_by: input.admin_id,
       validated_at: new Date(),
       updated_at: new Date()
     };
 
-    // Add notes if provided
-    if (input.notes) {
+    // Only update notes if provided, otherwise preserve existing notes
+    if (input.notes !== undefined) {
       updateData.notes = input.notes;
     }
 
@@ -61,13 +70,17 @@ export const validateAttendance = async (input: ValidateAttendanceInput): Promis
       .where(eq(attendanceTable.id, input.attendance_id))
       .execute();
 
+    const actionText = input.action === 'validate' ? 'validated' : 'rejected';
+    
     return {
       success: true,
-      message: `Attendance record successfully ${validationStatus}`
+      message: `Attendance record successfully ${actionText}`
     };
-
   } catch (error) {
-    console.error('Attendance validation failed:', error);
-    throw error;
+    console.error('Failed to validate attendance:', error);
+    return {
+      success: false,
+      message: 'Failed to process validation. Please try again.'
+    };
   }
 };

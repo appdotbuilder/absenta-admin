@@ -1,133 +1,117 @@
 import { db } from '../db';
-import { studentsTable, attendanceTable } from '../db/schema';
-import { type ExportReportInput, type ExportReportResponse, type AbsenceSummary } from '../schema';
-import { eq, and, gte, lte, ne, SQL } from 'drizzle-orm';
+import { attendanceTable, studentsTable } from '../db/schema';
+import { eq, and, ne, gte, lte, SQL } from 'drizzle-orm';
+import type { ExportReportInput, ExportReportResponse } from '../schema';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
 export const exportAbsenceReport = async (input: ExportReportInput): Promise<ExportReportResponse> => {
   try {
-    // 1. Query attendance records within date range
-    let baseQuery = db.select({
-      student_id: attendanceTable.student_id,
-      student_nis: studentsTable.nis,
-      student_name: studentsTable.full_name,
-      class_name: studentsTable.class_name,
-      date: attendanceTable.date,
-      status: attendanceTable.status,
-      validation_status: attendanceTable.validation_status
-    })
-    .from(attendanceTable)
-    .innerJoin(studentsTable, eq(attendanceTable.student_id, studentsTable.id));
-
-    // Build conditions array for filters
+    // Build query conditions
     const conditions: SQL<unknown>[] = [];
     
-    // Date range filter
+    // Filter by date range
     conditions.push(gte(attendanceTable.date, input.start_date));
     conditions.push(lte(attendanceTable.date, input.end_date));
     
-    // Only include absence records (not 'hadir')
+    // Filter by non-attendance statuses (exclude 'hadir')
     conditions.push(ne(attendanceTable.status, 'hadir'));
     
     // Only include validated records
     conditions.push(eq(attendanceTable.validation_status, 'validated'));
     
-    // Optional class filter
+    // Filter by class if specified
     if (input.class_name) {
       conditions.push(eq(studentsTable.class_name, input.class_name));
     }
 
-    // Apply all conditions
-    const query = baseQuery.where(and(...conditions));
+    // Get absence data
+    const absenceData = await db.select({
+      student_nis: studentsTable.nis,
+      student_name: studentsTable.full_name,
+      class_name: studentsTable.class_name,
+      date: attendanceTable.date,
+      status: attendanceTable.status,
+      notes: attendanceTable.notes
+    })
+    .from(attendanceTable)
+    .innerJoin(studentsTable, eq(attendanceTable.student_id, studentsTable.id))
+    .where(and(...conditions))
+    .orderBy(studentsTable.class_name, studentsTable.full_name, attendanceTable.date)
+    .execute();
 
-    const attendanceRecords = await query.execute();
+    // Group data by student and calculate breakdown
+    const studentMap = new Map<string, any>();
 
-    // 3. Aggregate absence data by student and class
-    const absenceSummary: Map<string, AbsenceSummary> = new Map();
-    
-    attendanceRecords.forEach(record => {
-      const key = `${record.student_id}-${record.class_name}`;
+    absenceData.forEach((record) => {
+      const key = `${record.student_nis}-${record.student_name}`;
       
-      if (!absenceSummary.has(key)) {
-        absenceSummary.set(key, {
-          class_name: record.class_name,
-          student_name: record.student_name,
+      if (!studentMap.has(key)) {
+        studentMap.set(key, {
           nis: record.student_nis,
-          total_absences: 0,
-          breakdown: {
-            izin: 0,
-            sakit: 0,
-            alpha: 0
-          }
+          name: record.student_name,
+          class_name: record.class_name,
+          total: 0,
+          izin: 0,
+          sakit: 0,
+          alpha: 0
         });
       }
+
+      const student = studentMap.get(key)!;
+      student.total += 1;
       
-      const summary = absenceSummary.get(key)!;
-      summary.total_absences++;
-      
+      // Update breakdown based on status
       if (record.status === 'izin') {
-        summary.breakdown.izin++;
+        student.izin += 1;
       } else if (record.status === 'sakit') {
-        summary.breakdown.sakit++;
+        student.sakit += 1;
       } else if (record.status === 'alpha') {
-        summary.breakdown.alpha++;
+        student.alpha += 1;
       }
     });
 
-    // Convert map to array and sort by class and student name
-    const summaryData = Array.from(absenceSummary.values()).sort((a, b) => {
+    // Convert map to array and sort
+    const studentsData = Array.from(studentMap.values()).sort((a, b) => {
       if (a.class_name !== b.class_name) {
         return a.class_name.localeCompare(b.class_name);
       }
-      return a.student_name.localeCompare(b.student_name);
+      return a.name.localeCompare(b.name);
     });
 
-    // 4. Generate CSV report file (simplified approach without XLSX dependency)
+    // Generate unique filename with timestamp
+    const timestamp = Date.now();
+    const filename = `laporan-ketidakhadiran-ringkasan_${timestamp}.csv`;
+    
+    // Ensure tmp/reports directory exists
     const reportsDir = path.join(process.cwd(), 'tmp', 'reports');
     await fs.mkdir(reportsDir, { recursive: true });
     
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const classFilter = input.class_name ? `_${input.class_name}` : '_semua-kelas';
-    
-    // Create summary CSV
-    const summaryFilename = `laporan-ketidakhadiran-ringkasan_${input.start_date}_${input.end_date}${classFilter}_${timestamp}.csv`;
-    const summaryFilePath = path.join(reportsDir, summaryFilename);
-    
-    const summaryHeader = 'NIS,Nama Siswa,Kelas,Total Tidak Hadir,Izin,Sakit,Alpha\n';
-    const summaryRows = summaryData.map(item => 
-      `${item.nis},"${item.student_name}",${item.class_name},${item.total_absences},${item.breakdown.izin},${item.breakdown.sakit},${item.breakdown.alpha}`
-    ).join('\n');
-    
-    const summaryContent = summaryHeader + summaryRows;
-    await fs.writeFile(summaryFilePath, summaryContent, 'utf-8');
-    
-    // Create detail CSV
-    const detailFilename = `laporan-ketidakhadiran-detail_${input.start_date}_${input.end_date}${classFilter}_${timestamp}.csv`;
-    const detailFilePath = path.join(reportsDir, detailFilename);
-    
-    const detailHeader = 'Tanggal,NIS,Nama Siswa,Kelas,Status\n';
-    const detailRows = attendanceRecords.map(record => 
-      `${record.date},${record.student_nis},"${record.student_name}",${record.class_name},${record.status.toUpperCase()}`
-    ).join('\n');
-    
-    const detailContent = detailHeader + detailRows;
-    await fs.writeFile(detailFilePath, detailContent, 'utf-8');
-    
-    // Return relative download URL for summary file (main report)
-    const downloadUrl = `/reports/${summaryFilename}`;
-    
+    const filePath = path.join(reportsDir, filename);
+
+    // Generate CSV content
+    const csvHeader = 'NIS,Nama Siswa,Kelas,Total Tidak Hadir,Izin,Sakit,Alpha';
+    const csvRows = studentsData.map(student => 
+      `${student.nis},"${student.name}",${student.class_name},${student.total},${student.izin},${student.sakit},${student.alpha}`
+    );
+    const csvContent = [csvHeader, ...csvRows].join('\n');
+
+    // Write CSV file
+    await fs.writeFile(filePath, csvContent, 'utf-8');
+
+    const studentCount = studentsData.length;
+    const totalAbsences = absenceData.length;
+
     return {
       success: true,
-      download_url: downloadUrl,
-      message: `Laporan berhasil dibuat. Ditemukan ${summaryData.length} siswa dengan total ${attendanceRecords.length} ketidakhadiran.`
+      download_url: `/reports/${filename}`,
+      message: `Laporan berhasil dibuat dengan ${studentCount} siswa dan ${totalAbsences} ketidakhadiran`
     };
-
   } catch (error) {
-    console.error('Export absence report failed:', error);
+    console.error('Failed to export absence report:', error);
     return {
       success: false,
-      message: 'Gagal membuat laporan ketidakhadiran. Silakan coba lagi.'
+      message: 'Gagal mengekspor laporan. Silakan coba lagi.'
     };
   }
 };

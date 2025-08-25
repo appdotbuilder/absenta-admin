@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { trpc } from '@/utils/trpc';
 import { AdminLogin } from '@/components/AdminLogin';
 import { AdminDashboard } from '@/components/AdminDashboard';
+// Import enhanced styles
+import './App.css';
 // Using type-only imports for better TypeScript compliance
 import type { AdminLoginInput } from '../../server/src/schema';
 
@@ -66,24 +68,20 @@ function App() {
   // If admin is not logged in, show login page
   if (!currentAdmin) {
     return (
-      <div className="min-h-screen bg-gray-100">
-        <AdminLogin 
-          onLogin={handleLogin}
-          isLoading={isLoading}
-          error={loginError}
-        />
-      </div>
+      <AdminLogin 
+        onLogin={handleLogin}
+        isLoading={isLoading}
+        error={loginError}
+      />
     );
   }
 
   // If admin is logged in, show dashboard
   return (
-    <div className="min-h-screen bg-gray-100">
-      <AdminDashboard 
-        admin={currentAdmin}
-        onLogout={handleLogout}
-      />
-    </div>
+    <AdminDashboard 
+      admin={currentAdmin}
+      onLogout={handleLogout}
+    />
   );
 }
 
